@@ -1,0 +1,48 @@
+{
+  "beschreibung": "Ground Truth fuer echte Verpackungsfotos. score=null heisst 'kein Nutri-Score'. 'score_unsicher' markiert Faelle, in denen selbst die manuelle Sichtpruefung (Zoom) nicht eindeutig war; dort zaehlen alle genannten Scores als richtig.",
+  "quellen": "Scores per Zoom-Analyse der Logos verifiziert; echtfoto_03 ist ein sehr kleines Logo, dessen helles B-Band farblich nicht segmentierbar ist.",
+  "images": [
+    {
+      "file": "testdata/echtfoto_01_src.png",
+      "score": "D",
+      "score_unsicher": false,
+      "bemerkung": "vertikal ausgerichtetes Logo, links oben; grosses D per Zoom verifiziert"
+    },
+    {
+      "file": "testdata/echtfoto_02_src.png",
+      "score": "E",
+      "score_unsicher": false,
+      "bemerkung": "unten links; grosses E per Zoom verifiziert"
+    },
+    {
+      "file": "testdata/echtfoto_03_src.png",
+      "score": ["A", "B"],
+      "score_unsicher": true,
+      "bemerkung": "unten links; helles B-Band nicht segmentierbar, Score manuell nicht eindeutig lesbar"
+    },
+    {
+      "file": "testdata/echtfoto_04_src.png",
+      "score": null,
+      "score_unsicher": false,
+      "bemerkung": "Negativtest: AETTA-Firmenlogo mit bunten Buchstaben, kein Nutri-Score"
+    },
+    {
+      "file": "testdata/echtfoto_05_src.png",
+      "score": "A",
+      "score_unsicher": false,
+      "bemerkung": "sehr kleines Logo links Mitte; grosses A per Zoom verifiziert"
+    },
+    {
+      "file": "testdata/echtfoto_06_src.png",
+      "score": "C",
+      "score_unsicher": false,
+      "bemerkung": "Kapsel C"
+    },
+    {
+      "file": "testdata/echtfoto_07_src.png",
+      "score": ["B", "D"],
+      "score_unsicher": true,
+      "bemerkung": "oben rechts; VLM-Sichtpruefung schwankte zwischen B und D, Detektor liest D"
+    }
+  ]
+}

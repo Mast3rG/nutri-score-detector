@@ -20,18 +20,31 @@ Analysiert Bilder von Verpackungsvorderseiten und beantwortet drei Fragen:
 ```bash
 pip install -r requirements.txt
 
+# Einzelbild
 python -m nutri_score_detector verpackung.jpg
 python -m nutri_score_detector verpackung.jpg --json          # maschinenlesbare Ausgabe
 python -m nutri_score_detector verpackung.jpg --debug out.png # annotiertes Bild
+
+# Ganzer Ordner (Batch) mit Ergebnistabelle:
+python -m nutri_score_detector fotos/ --csv ergebnis.csv --annotiert annotated/
 ```
 
 ## Test/ Evaluation
 
+Die CSV-Spalten im Batch-Modus: `datei, nutri_score_present, score, confidence,
+bbox_x..h, rel_x..rel_h, area_fraction_of_image`.
+
 ```bash
 # synthetische Verpackungen erzeugen (offizielle Logo-Geometrie):
 python -m nutri_score_detector.make_test_images 60
-python -m nutri_score_detector.evaluate
+python -m nutri_score_detector.evaluate                    # synthetische Auswertung
+python -m nutri_score_detector.evaluate testdata/benchmark.json   # Echtfoto-Auswertung
 ```
+
+Echtfoto-Benchmark (`testdata/benchmark.json`, 7 Packshots): Presence-Genauigkeit
+**100 %** (7/7), Score-Genauigkeit bei manuell eindeutig lesbaren Logos **100 %**
+(4/4); bei 2 weiteren (03, 07) war selbst die Sichtpruefung uneindeutig, beide
+liegen im tolerierten Bereich. Details in der Datei.
 
 Aktuelle Ergebnisse auf 150 synthetischen Fronten inkl. Störfarben (seed 42, v6):
 

@@ -9,7 +9,7 @@ from pathlib import Path
 import cv2
 
 from .colors import SCORE_LETTERS
-from .detector import NutriScoreDetector, annotate
+from .detector import NutriScoreDetector, analyze_file, annotate
 from .make_test_images import synth_package
 
 
@@ -59,6 +59,46 @@ def evaluate(count: int = 120, seed: int = 42) -> dict:
     }
 
 
+def evaluate_benchmark(path: str = "testdata/benchmark.json") -> dict:
+    """Bewertet den Detektor gegen echte Fotos mit eingetragener Wahrheit.
+
+    Erwartet eine JSON-Datei mit images: [{file, score (str|list|null),
+    score_unsicher, bemerkung}, ...]. score=null = kein Logo.
+    """
+    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    present_ok = ok = n = n_certain = ok_certain = 0
+    details = []
+    for entry in data.get("images", []):
+        file = entry["file"]
+        truth = entry["score"]
+        accepted = truth if isinstance(truth, list) else ([truth] if truth is not None else [])
+        try:
+            res = analyze_file(file)
+        except (ValueError, OSError) as exc:
+            details.append({"file": file, "error": str(exc)})
+            continue
+        got = res["score"] if res.get("nutri_score_present") else None
+        item = {"file": file, "erwartet": truth, "erhalten": got}
+        n += 1
+        if (got is None) == (truth is None):
+            present_ok += 1
+        if truth is not None:
+            n_certain += 0 if entry.get("score_unsicher") else 1
+            if got in accepted:
+                ok += 1
+                ok_certain += 0 if entry.get("score_unsicher") else 1
+        details.append(item)
+
+    return {
+        "images": n,
+        "presence_accuracy": round(present_ok / max(n, 1), 3),
+        "score_accuracy": round(ok / max(n, 1), 3),
+        "score_accuracy_certain_only": round(ok_certain / max(n_certain, 1), 3),
+        "nicht_bewertbare_score_faelle": n - n_certain,
+        "details": details,
+    }
+
+
 def save_demo(out_dir: str = "testdata", count: int = 15, seed: int = 42) -> None:
     out = Path(out_dir)
     out.mkdir(exist_ok=True)
@@ -74,4 +114,9 @@ def save_demo(out_dir: str = "testdata", count: int = 15, seed: int = 42) -> Non
 
 
 if __name__ == "__main__":
-    print(json.dumps(evaluate(), indent=2))
+    import sys
+
+    if len(sys.argv) > 1:
+        print(json.dumps(evaluate_benchmark(sys.argv[1]), indent=2, ensure_ascii=False))
+    else:
+        print(json.dumps(evaluate(), indent=2))
