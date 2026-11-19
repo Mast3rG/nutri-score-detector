@@ -9,11 +9,11 @@ Ansatz:
   1. HSV-Segmentierung der 5 offiziellen Nutri-Score-Farben (tolerant
      gegenueber Beleuchtung/Entsaettigung).
   2. Farbkomponenten in lesbare Gruppen clustern (Kreise/Kisten nahe beieinander).
-  3. Verifikation ueber das charakteristische Treppenmuster: 5 Farbbalken
-     nebeneinander, von A (oben links) nach E (unten rechts) abfallend,
-     Balken rechts/unter dem Score kleiner als davor.
-  4. Score = letzte "vollhoehe" Farbbahn; staerkt durch Vergleich der
-     weissen Buchstaben-Lochflaechen.
+  3. Verifikation ueber die offizielle Logo-Geometrie (aus dem SVG der
+     Charta gemessen): 5 Farbbaender gleicher Hoehe in einer Reihe, das
+     Score-Band als "Kapsel" deutlich breiter (1.2x) und hoeher (1.25x)
+     als die uebrigen Baender, mit grossem weissen Buchstaben.
+  4. Score = Farbe der Kapsel; Rueckfallebene: weisse Buchstaben-Lochflaechen.
 """
 
 from __future__ import annotations
@@ -40,12 +40,14 @@ class NutriScoreDetector:
         min_color_share: float = 0.02,
         min_colors: int = 4,
         min_component_px: int = 25,
-        aspect_lo: float = 0.45,
-        aspect_hi: float = 2.8,
-        expand_frac: float = 0.45,
-        height_rise: float = 1.12,
-        height_drop: float = 0.30,
-        full_height_frac: float = 0.62,
+        aspect_lo: float = 0.2,
+        aspect_hi: float = 5.5,
+        capsule_h_ratio: float = 1.10,
+        capsule_w_ratio: float = 0.92,
+        band_h_consistency: float = 0.72,
+        min_hole_px: int = 12,
+        hole_margin: float = 2.00,
+        upscale_min_dim: int = 400,
     ) -> None:
         self.min_group_fraction = min_group_fraction
         self.max_group_fraction = max_group_fraction
@@ -54,10 +56,12 @@ class NutriScoreDetector:
         self.min_component_px = min_component_px
         self.aspect_lo = aspect_lo
         self.aspect_hi = aspect_hi
-        self.expand_frac = expand_frac
-        self.height_rise = height_rise
-        self.height_drop = height_drop
-        self.full_height_frac = full_height_frac
+        self.capsule_h_ratio = capsule_h_ratio
+        self.capsule_w_ratio = capsule_w_ratio
+        self.band_h_consistency = band_h_consistency
+        self.min_hole_px = min_hole_px
+        self.hole_margin = hole_margin
+        self.upscale_min_dim = upscale_min_dim
 
     def color_masks(self, hsv: np.ndarray) -> dict[str, np.ndarray]:
         masks = {}
@@ -68,39 +72,126 @@ class NutriScoreDetector:
             masks[letter] = m
         return masks
 
-    def _per_color_regions(self, entries: list[dict], bbox) -> dict[str, dict]:
-        """Groesste Farbkomponente je Farbe innerhalb der BBox."""
-        x0, y0, x1, y1 = bbox
+    def _suppress_overlaps(self, entries: list[dict]) -> list[dict]:
+        """Komponenten verschiedener Farben, deren Boxen sich stark ueberlappen,
+        sind Segmentierungsartefakte (z.B. C-Band verschmolzen mit der D-Kapsel);
+        nur die dominante bleibt."""
+        keep = [True] * len(entries)
+        for i, a in enumerate(entries):
+            if not keep[i]:
+                continue
+            for j, b in enumerate(entries):
+                if i == j or a["letter"] == b["letter"] or not keep[j]:
+                    continue
+                ix = min(a["x"] + a["w"], b["x"] + b["w"]) - max(a["x"], b["x"])
+                iy = min(a["y"] + a["h"], b["y"] + b["h"]) - max(a["y"], b["y"])
+                if ix <= 0 or iy <= 0:
+                    continue
+                if ix * iy >= 0.7 * min(a["area"], b["area"]):
+                    if a["area"] < b["area"]:
+                        keep[i] = False
+                        break
+                    keep[j] = False
+        return [e for e, k in zip(entries, keep) if k]
+
+    def _transform(self, boxes: dict, rot: int, W: int, H: int) -> dict[str, dict]:
+        """Bilde Banderkisten in eine hanhaafte Ausrichtung (0/90/180/270)."""
+        if rot == 0:
+            return boxes
         out = {}
-        for letter in SCORE_LETTERS:
-            cands = [e for e in entries
-                     if e["letter"] == letter and e["w"] <= (x1 - x0) * 1.05
-                     and x0 - 4 <= (e["x"] + e["w"] / 2) <= x1 + 4
-                     and y0 - 4 <= (e["y"] + e["h"] / 2) <= y1 + 4]
-            if cands:
-                out[letter] = max(cands, key=lambda e: e["area"])
+        for L, b in boxes.items():
+            x, y, w, h = b["x"], b["y"], b["w"], b["h"]
+            if rot == 90:
+                nx, ny, nw, nh = y, W - (x + w), h, w
+            elif rot == 180:
+                nx, ny, nw, nh = W - (x + w), H - (y + h), w, h
+            else:
+                nx, ny, nw, nh = H - (y + h), x, h, w
+            out[L] = {"x": nx, "y": ny, "w": nw, "h": nh, "area": b["area"]}
         return out
 
-    def _staircase_ok(self, boxes: dict[str, dict]) -> tuple[bool, float]:
-        """Treppenmuster A->E: x wandert nach rechts, Kanten sinken nie stark,
-         Hoehen bleiben plausibel (kein Anstieg >1.12x, kein Einbruch <0.30x)."""
+    def _staircase_ok(self, boxes: dict) -> tuple[bool, float]:
+        """Treppenmuster A->E: x wandert nach rechts, hoehen plausibel,
+        Obergrenze nicht voran (leichtes Absenken erlaubt, kein Sprung nach oben)."""
         keys = [L for L in SCORE_LETTERS if L in boxes]
         hs = [boxes[L]["h"] for L in keys]
         xs = [boxes[L]["x"] + boxes[L]["w"] / 2 for L in keys]
         tops = [boxes[L]["y"] for L in keys]
         hmax = max(hs)
+        if len(hs) < self.min_colors:
+            return False, 0.0
         for i in range(len(keys) - 1):
             if xs[i + 1] < xs[i] - 0.05 * hmax:
                 return False, 0.0
-            if tops[i + 1] < tops[i] - 0.35 * max(hs[i], 1):
+            if tops[i + 1] < tops[i] - (0.5 * max(hs[i], 1) + 4):
                 return False, 0.0
-            if hs[i + 1] > self.height_rise * hs[i] + 2:
+            if hs[i + 1] > 1.45 * hs[i] + 2:
                 return False, 0.0
-            if hs[i + 1] < self.height_drop * hs[i] - 2:
+            if hs[i + 1] < 0.38 * hs[i] - 2:
                 return False, 0.0
         return True, 1.0
 
+    @staticmethod
+    def _max_box_overlap(regions: dict) -> float:
+        """Stark ueberlappende Paare von Farbkomponenten sind ein Hinweis auf
+        verschmolzene Segmentierung (Artefakt); bestes Paar-Uberlapp-Mass."""
+        vals = list(regions.values())
+        worst = 0.0
+        for i in range(len(vals)):
+            for j in range(i + 1, len(vals)):
+                a, b = vals[i], vals[j]
+                ix = min(a["x"] + a["w"], b["x"] + b["w"]) - max(a["x"], b["x"])
+                iy = min(a["y"] + a["h"], b["y"] + b["h"]) - max(a["y"], b["y"])
+                if ix <= 0 or iy <= 0:
+                    continue
+                worst = max(worst, min(1.0, ix * iy / min(a["area"], b["area"])))
+        return worst
+
+    def _capsule_letter(self, tb: dict, present: list[str]) -> tuple[str | None, dict]:
+        """Offizielle Geometrie: das Score-Band ist Kapsel und damit messbar
+        breiter und hoeher als die uebrigen Baender. Liefert (Farbe, Verhaeltnisse)."""
+        hs = [tb[L]["h"] for L in present]
+        ws = [tb[L]["w"] for L in present]
+        h_med = float(np.median(hs))
+        w_med = float(np.median(ws))
+        if h_med <= 0 or w_med <= 0:
+            return None, {}
+        ratios = {L: round(min(tb[L]["h"] / h_med, tb[L]["w"] / w_med), 3)
+                  for L in present}
+        cap = max(ratios, key=ratios.get)
+        if len(present) >= self.min_colors \
+                and tb[cap]["h"] >= self.capsule_h_ratio * h_med \
+                and tb[cap]["w"] >= self.capsule_w_ratio * w_med:
+            # Offizielle Geometrie: alle NICHT-Score-Baender sind gleich hoch
+            others = sorted(tb[L]["h"] for L in present if L != cap)
+            o_med = float(np.median(others))
+            if o_med > 0 and min(others) < self.band_h_consistency * o_med:
+                return None, ratios
+            return cap, ratios
+        return None, ratios
+
     def analyze(self, image_bgr: np.ndarray) -> dict:
+        h_img, w_img = image_bgr.shape[:2]
+        img_area = h_img * w_img
+
+        scale = 1
+        if min(h_img, w_img) < self.upscale_min_dim:
+            scale = -(-self.upscale_min_dim // max(min(h_img, w_img), 1))
+            image_bgr = cv2.resize(image_bgr, (w_img * scale, h_img * scale),
+                                   interpolation=cv2.INTER_CUBIC)
+        r = self._analyze_scaled(image_bgr)
+        if scale > 1 and r.get("bbox"):
+            bx, by, bw, bh = (max(1, round(r["bbox"][k] / scale))
+                              for k in ("x", "y", "w", "h"))
+            r["bbox"] = {"x": bx, "y": by, "w": bw, "h": bh}
+            r["bbox_relative"] = {"x": round(bx / w_img, 4), "y": round(by / h_img, 4),
+                                  "w": round(bw / w_img, 4), "h": round(bh / h_img, 4)}
+            r["size"] = {"width_px": bw, "height_px": bh,
+                         "height_rel_to_image_height": round(bh / h_img, 4),
+                         "area_fraction_of_image": round(bw * bh / img_area, 5)}
+        return r
+
+    def _analyze_scaled(self, image_bgr: np.ndarray) -> dict:
         h_img, w_img = image_bgr.shape[:2]
         img_area = h_img * w_img
         min_px = max(self.min_component_px, int(img_area * 0.00001))
@@ -119,10 +210,11 @@ class NutriScoreDetector:
                 entries.append({"letter": letter, "x": x, "y": y,
                                 "w": w, "h": h, "area": area})
 
-        results = self._anchor_candidates(entries)
+        results = self._anchor_candidates(entries, w_img, h_img)
+        results += self._anchor_candidates(self._suppress_overlaps(entries), w_img, h_img)
 
         best = None
-        for regions in results:
+        for (regions, rot) in results:
             if len(regions) < self.min_colors:
                 continue
             ok_step, step_score = self._staircase_ok(regions)
@@ -142,9 +234,11 @@ class NutriScoreDetector:
             frac = (bw * bh) / img_area
             if not (self.min_group_fraction <= frac <= self.max_group_fraction):
                 continue
-            aspect = bw / max(bh, 1)
-            if not (self.aspect_lo <= aspect <= self.aspect_hi):
+            r_xy = bw / max(bh, 1)
+            r_yx = bh / max(bw, 1)
+            if not (min(r_xy, r_yx) >= self.aspect_lo and max(r_xy, r_yx) <= self.aspect_hi):
                 continue
+            aspect = r_xy
             coverage = total / (bw * bh)
             if coverage < 0.10:
                 continue
@@ -153,72 +247,99 @@ class NutriScoreDetector:
             if len(present) < self.min_colors:
                 continue
 
-            hs = [regions[L]["h"] for L in SCORE_LETTERS if L in regions]
-            full = [L for L in SCORE_LETTERS
-                    if L in regions and regions[L]["h"] >= self.full_height_frac * max(hs)]
+            tb = self._transform(regions, rot, w_img, h_img)
+            capsules, ratios = self._capsule_letter(tb, present)
             holes = self._letter_holes(hsv, regions)
-            score_letter = full[-1] if full else max(counts, key=counts.get)
             hole_sum = sum(holes.values())
             ranked = sorted(holes.values(), reverse=True)
             letter_margin = ranked[0] / max(ranked[1], 1) if hole_sum > 0 else 0.0
-            holes_max = max(holes, key=holes.get) if hole_sum > 0 else None
-            if (holes_max is not None and letter_margin >= 1.6
-                    and full and holes_max in full and holes_max != score_letter
-                    and SCORE_LETTERS.index(score_letter) < SCORE_LETTERS.index(holes_max)):
-                score_letter = holes_max
 
-            dominant_share = counts[score_letter] / total
-            confidence = round(min(1.0, 0.25 * len(present) / 5
-                                   + 0.45 * step_score
-                                   + 0.20 * min(letter_margin, 2.0) / 2.0
-                                   + 0.10), 3)
+            if capsules is not None:
+                score_letter = capsules
+                evidence = 2
+            elif hole_sum >= self.min_hole_px and letter_margin >= self.hole_margin:
+                score_letter = max(holes, key=holes.get)
+                evidence = 1
+            else:
+                continue
 
+            purity = 1.0 - self._max_box_overlap(regions)
             candidate = {
                 "bbox": {"x": int(bb_x0), "y": int(bb_y0), "w": int(bw), "h": int(bh)},
                 "counts": counts,
                 "holes": holes,
+                "capsule_ratios": ratios,
                 "colors_present": sorted(present),
                 "n_colors": len(present),
                 "score": score_letter,
-                "dominant_share": float(dominant_share),
+                "evidence": evidence,
+                "purity": purity,
+                "dominant_share": float(counts[score_letter] / total),
                 "colored_share": float(total / (bw * bh)),
                 "letter_margin": float(letter_margin),
                 "step_score": step_score,
                 "aspect": float(aspect),
-                "rank": (len(present), step_score, round(coverage, 3)),
+                "rank": (evidence, purity, len(present), step_score, round(coverage, 2)),
             }
             if best is None or candidate["rank"] >= best["rank"]:
                 best = candidate
 
         return self._build_result(best, img_area, w_img, h_img)
 
-    def _anchor_candidates(self, entries: list[dict]) -> list[dict]:
-        """Jede Komponente ist Anker; um sie werden die naechsten Komponenten
-        der anderen Farben gesucht -> Kandidat aus 5 (bzw. 4) Baendern."""
+    def _anchor_candidates(self, entries: list[dict], W: int, H: int) -> list[tuple[dict, int]]:
+        """Jede Komponente ist Anker; Kombinatorik ueber die K naechsten
+        Komponenten je Farbe, 4 Rotationen. Ergebnis: (regionen, rotation)."""
         by_letter = {L: [e for e in entries if e["letter"] == L] for L in SCORE_LETTERS}
-        candidates = []
-        for anchor in entries:
-            regions = {anchor["letter"]: anchor}
+        topk = 4
+        near: dict[int, dict[str, list[dict]]] = {}
+        for idx, anchor in enumerate(entries):
             acx, acy = anchor["x"] + anchor["w"] / 2, anchor["y"] + anchor["h"] / 2
-            reach = 3.5 * max(anchor["w"], anchor["h"]) + 20
-            ok = True
+            reach = 4.0 * max(anchor["w"], anchor["h"]) + 20
+            near[idx] = {}
             for L in SCORE_LETTERS:
                 if L == anchor["letter"]:
                     continue
-                cands = by_letter.get(L, [])
-                if not cands:
-                    ok = False
-                    break
-                nb = min(cands, key=lambda e: (e["x"] + e["w"] / 2 - acx) ** 2
-                                           + (e["y"] + e["h"] / 2 - acy) ** 2)
-                dx = nb["x"] + nb["w"] / 2 - acx
-                dy = nb["y"] + nb["h"] / 2 - acy
-                if (dx * dx + dy * dy) ** 0.5 > reach:
-                    ok = False
-                    break
-                regions[L] = nb
-            if ok and len(regions) >= self.min_colors:
-                candidates.append(regions)
+                pool = []
+                for e in by_letter.get(L, []):
+                    dx = e["x"] + e["w"] / 2 - acx
+                    dy = e["y"] + e["h"] / 2 - acy
+                    d = (dx * dx + dy * dy) ** 0.5
+                    if d <= reach:
+                        pool.append((d, e))
+                pool.sort(key=lambda t: t[0])
+                near[idx][L] = [e for _d, e in pool[:topk]]
+
+        seen = set()
+        candidates = []
+        sub_sets = [None] + [[L] for L in SCORE_LETTERS]
+        for idx, anchor in enumerate(entries):
+            for omit in sub_sets:
+                pools = {}
+                n_opts = 1
+                for L, pool in near[idx].items():
+                    if omit and L in omit:
+                        continue
+                    pools[L] = pool
+                    n_opts *= len(pool)
+                for combo_i in range(n_opts):
+                    regions = {anchor["letter"]: anchor}
+                    tmp = combo_i
+                    for L, pool in pools.items():
+                        regions[L] = pool[tmp % len(pool)]
+                        tmp //= len(pool)
+                    if len(regions) < self.min_colors:
+                        continue
+                    key = tuple(sorted((L, r["x"], r["y"], r["w"], r["h"])
+                                       for L, r in regions.items()))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    for rot in (0, 90, 180, 270):
+                        tb = self._transform(regions, rot, W, H)
+                        ok, step = self._staircase_ok(tb)
+                        if ok:
+                            candidates.append((regions, rot))
+                            break
         return candidates
 
     def _letter_holes(self, hsv, regions) -> dict[str, int]:
@@ -283,10 +404,10 @@ class NutriScoreDetector:
         }
 
     def _confidence(self, best) -> float:
-        return round(min(1.0, 0.25 * best["n_colors"] / 5
-                         + 0.45 * best["rank"][1]
-                         + 0.20 * min(best["letter_margin"], 2.0) / 2.0
-                         + 0.10), 3)
+        if best["evidence"] >= 2:
+            return round(min(1.0, 0.60 + 0.08 * best["n_colors"]
+                             + 0.05 * best["rank"][2] + 0.05 * best["purity"]), 3)
+        return round(0.35 + 0.10 * best["n_colors"], 3)
 
 
 def annotate(image_bgr: np.ndarray, result: dict) -> np.ndarray:
