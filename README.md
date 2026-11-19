@@ -34,12 +34,18 @@ Aktuelle Ergebnisse auf 150 synthetischen Fronten inkl. Störfarben:
 
 | Metrik | Wert |
 |---|---|
-| Presence-Genauigkeit | 99,3 % |
-| Logo gefunden (bei vorhandenem Score) | 99,1 % |
+| Presence-Genauigkeit | 99,0 % |
+| Logo gefunden (bei vorhandenem Score) | 98,7 % |
 | Score-Genauigkeit (wenn Logo gefunden) | 100 % |
-| Mittlerer IoU der Bounding Box | 0,91 |
+| Mittlerer IoU der Bounding Box | 0,99 |
 
-Bei JPEG 65 + Gauß-Rauschen + Rotation ±6° noch ~97 % Presence / ~97 % Score.
+Erfolgreich getestet an einem echten Packshot (`testdata/echtfoto_01_*`): kleines Logo
+(~6 % der Bildbreite) neben großen störenden roten Flächen (Pizza-Toppings) wird richtig
+lokalisiert und richtig bewertet. Der Detektor nutzt daher kein reines
+Farb-Clustering, sondern Anker-basierte Suche: um jede Farbkomponente werden die
+nächsten Nachbarn der anderen Farben gesucht und verifiziert – inklusive Check
+des charakteristischen Treppenmusters (A oben links bis E unten rechts, Balkenhöhen
+scheinen nie nach rechts oben anzuwachsen).
 
 ## Wechsel auf echtes Lernen (empfohlen für reale Fotos)
 
